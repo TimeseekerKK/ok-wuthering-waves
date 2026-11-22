@@ -58,6 +58,7 @@ from src.char.Youhu import Youhu
 from src.char.Yuanwu import Yuanwu
 from src.char.Zani import Zani
 from src.char.Zhezhi import Zhezhi
+from src.char.CustomCharLoader import load_team_char_class, normalize_team
 
 _char_dict_raw = {
     Labels.char_aalto: {'cls': Aalto, 'char_type': CharType.SUB_DPS,
@@ -226,6 +227,35 @@ def get_char_by_pos(task, box, index, old_char):
     if task.debug:
         task.screenshot(f'could not find char {index}')
     return BaseChar(task, index, char_name=name)
+
+
+def apply_team_char_classes(task, chars):
+    """Apply custom code only after the complete three-character team is known."""
+    known_chars = [(index, char, char_dict[char.char_name]['cls'])
+                   for index, char in enumerate(chars)
+                   if char is not None and char.char_name in char_dict]
+    team = None
+    if len(chars) == len(known_chars) == 3:
+        try:
+            team = normalize_team(cls for _, _, cls in known_chars)
+        except ValueError:
+            pass
+    for index, char, builtin_cls in known_chars:
+        desired_cls = load_team_char_class(builtin_cls, team) if team else builtin_cls
+        if type(char) is desired_cls:
+            continue
+        replacement = desired_cls(
+            task,
+            char.index,
+            char_name=char.char_name,
+            confidence=char.confidence,
+            ring_index=char.ring_index,
+            char_type=char.char_type,
+            buff_time=char.buff_time,
+        )
+        replacement.__dict__.update(char.__dict__)
+        chars[index] = replacement
+    return chars
 
 
 def is_float(s):
