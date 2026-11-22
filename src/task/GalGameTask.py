@@ -10,14 +10,26 @@ from ok import BaseTask
 from src.task.task_icons import task_icon
 
 
-DATE = re.compile(r"(0[1-9]|1[0-2])[/／](0[1-9]|[12]\d|3[01])(?:周[一二三四五六日])?")
+DATE = re.compile(r"(0[1-9]|1[0-2])[/／](0[1-9]|[12]\d|3[01])(?:周[一二三四五六日天]?)?")
 REWARD_PAGES = ("限时奖励", "常驻奖励")
+GIFT_LOCATIONS = ("街道", "学生理事会", "文科教室")
 REWARD_PROGRESS = re.compile(r"(\d+)\s*[/／]\s*(14|15)")
 LETTER_PAGE = re.compile(r"[1-9]/[1-9]")
+AUTOSAVE_MINIMUM = "CCDDD"
+GRADE_ORDER = "DCBAS"
+# Colors of the five attribute grades on the archive cards, in BGR order.
+ARCHIVE_GRADE_COLORS = {
+    "D": (170, 172, 170),
+    "C": (160, 185, 153),
+    "B": (214, 172, 134),
+    "A": (125, 102, 237),
+    "S": (78, 173, 240),
+}
 STORY_CHOICES = (
     "之前在列车", "在列车上", "昨天在列车", "昨天在火车", "昨天在电车", "回到原本的世界", "我想回去",
     "是的",
-    "休息一下再回去", "同时加入", "在天马集团之前买下", "综合素质", "学业与逻辑", "洛可可帮忙",
+    "休息一下再回去", "同时加入", "两者都加入", "两边都加入", "两个都加入",
+    "我会利用自己的个人影响力", "在天马集团之前买下", "综合素质", "学业与逻辑", "洛可可帮忙",
     "学生理事会", "回家吧", "开启下一周目", "开启新周目",
 )
 COURSES = {
@@ -37,12 +49,12 @@ OUTINGS = (
     "检定考试", "成人礼庆典", "成人礼", "全国大赛", "最终考察", "毕业典礼",
 )
 EXAM_ANSWERS = {
-    (7, 1): (r"判断.*(?:感受|立场)", r"斜边的平方", r"(?:两者|二者|都).*(?:一样|相同|相等)"),
+    (7, 1): (r"判断.*(?:感受|立场)", r"^斜边的平方$", r"(?:两者|二者|都).*(?:一样|相同|相等)"),
     (7, 2): (r"弦乐器", r"表达.*(?:情感|思想)", r"(?:舞台|表演).*(?:生动|统一|完整)"),
     (9, 2): (r"^4倍$", r"^25$", r"^28$"),
     (9, 3): (r"竖琴", r"明暗关系", r"低音提琴"),
-    (11, 26): (r"入射角", r"一手.*二手|一次资料.*二次资料"),
-    (11, 27): (r"音高.*音量|声音的高低.*声音的大小", r"打击乐器"),
+    (11, 26): (r"^入射角$", r"一手.*二手|一次资料.*二次资料"),
+    (11, 27): (r"音高.*响度|音高.*音量|声音的高低.*声音的大小", r"^打击乐(?:器)?$"),
 }
 
 
@@ -70,7 +82,92 @@ class GalGameTask(BaseTask):
         return None
 
     def _lobby(self, boxes):
-        return self._label(boxes, "开始新学期", (.65, .55, .98, .96))
+        return self._label(boxes, "开始新学期", (.65, .58, .98, .80), contains=True)
+
+    def _archive_button(self, boxes):
+        return self._label(boxes, "档案读取", (.84, .4, .99, .58), contains=True)
+
+    def _archive_page(self, boxes):
+        return self._label(boxes, "档案读取", (.07, .12, .27, .22), contains=True)
+
+    def _autosave_grades(self):
+        # Each attribute has its own slot. Read the main letter's color;
+        # the superscript '+' does not affect comparison with C or D.
+        grades = []
+        y1, y2 = (round(value * self.height / 900) for value in (271, 299))
+        for x in (356, 421, 486, 551, 616):
+            x1, x2 = (round(value * self.width / 1600) for value in (x - 14, x + 14))
+            pixels = self.frame[y1:y2, x1:x2].astype(np.int16)
+            coverage = {
+                grade: np.mean(np.all(np.abs(pixels - color) <= 14, axis=2))
+                for grade, color in ARCHIVE_GRADE_COLORS.items()
+            }
+            grade = max(coverage, key=coverage.get)
+            if coverage[grade] < .13:
+                return None
+            grades.append(grade)
+        return "".join(grades)
+
+    def _choose_journey(self, boxes):
+        if self._archive_button(boxes):
+            self.click(.922, .468, after_sleep=.6)
+        elif not self._archive_page(boxes):
+            raise RuntimeError("活动首页没有识别到「档案读取」。")
+
+        grades = None
+        journey_number = None
+
+        def read_autosave():
+            nonlocal grades, journey_number
+            archive = self._read()
+            if not self._archive_page(archive):
+                return False
+            if self._label(archive, "自动存档", (.40, .20, .50, .27), contains=True):
+                grades = self._autosave_grades()
+                if self._label(archive, "1周目", (.10, .18, .20, .27), contains=True):
+                    journey_number = 1
+                elif self._label(archive, "2周目", (.10, .18, .20, .27), contains=True):
+                    journey_number = 2
+                return grades is not None
+            return bool(self._label(archive, "暂无存档", (.20, .24, .39, .36)))
+
+        if not self.wait_until(read_autosave, time_out=6):
+            raise RuntimeError("无法确认自动存档的评分，未选择旅程。")
+
+        self.click(.954, .068, after_sleep=.65)
+
+        def read_lobby():
+            current = self._read()
+            return current if self._lobby(current) and self._archive_button(current) else None
+
+        lobby = self.wait_until(read_lobby, time_out=6)
+        if not lobby:
+            raise RuntimeError("检查自动存档后无法返回活动首页。")
+        resume = self._meets_autosave_minimum(grades)
+        self._journey_number = journey_number if resume else 1
+        action = "继续旅程" if resume else "开始新学期"
+        self.log_info(f"自动存档评分 {grades or '暂无存档'}，选择「{action}」")
+        return lobby, resume
+
+    @staticmethod
+    def _meets_autosave_minimum(grades):
+        return bool(grades and len(grades) == len(AUTOSAVE_MINIMUM)
+                    and all(GRADE_ORDER.index(grade) >= GRADE_ORDER.index(minimum)
+                            for grade, minimum in zip(grades, AUTOSAVE_MINIMUM)))
+
+    def _continue_journey_button(self, boxes):
+        button = self._label(boxes, "继续旅程", (.65, .72, .98, .96), contains=True)
+        if button:
+            return button
+        return next(iter(self.ocr(.64, .72, .98, .96, match="继续旅程")), None)
+
+    def _start_from_archive(self, boxes):
+        lobby, resume = self._choose_journey(boxes)
+        button = self._continue_journey_button(lobby) if resume else self._lobby(lobby)
+        if not button:
+            raise RuntimeError("自动存档评分已达标，未识别到「继续旅程」。")
+        self._starting_semester = not resume
+        self.click(button, after_sleep=2)
 
     def _date(self, boxes):
         for box in boxes:
@@ -88,7 +185,8 @@ class GalGameTask(BaseTask):
             or self._label(boxes, "新增物品", (.06, .2, .33, .4), contains=True)
             or self._label(boxes, "属性提升", (.35, .26, .65, .39))
             or self._label(boxes, "本月总结", (.16, .03, .42, .14))
-            or self._schedule_save(boxes)
+            or self._schedule_save(boxes) or self._ending_selector(boxes)
+            or self._label(boxes, "即将进入结局阶段", (.29, .38, .73, .59), contains=True)
             or self._commission_offer(boxes)
             or self._attribute_check(boxes)
             or self._attribute_result(boxes)
@@ -100,7 +198,7 @@ class GalGameTask(BaseTask):
             or self._label(boxes, "课题清单", (0, 0, .2, .12), contains=True)
             or self._label(boxes, "档案管理", (0, 0, .2, .12), contains=True)
             or any(self._label(boxes, title, (0, 0, .2, .13)) for title in REWARD_PAGES)
-            or self._label(boxes, "结束", (.83, .9, .97, .98))
+            or self._letter_button(boxes)
             or self._letter(boxes)
             or self._envelope(boxes)
             or self._black_narration(boxes)
@@ -110,29 +208,85 @@ class GalGameTask(BaseTask):
         prompts = ("是否外出", "选择该方向后", "是否开始执行", "是否开始日程", "是否执行日程",
                    "将结束今日的地图探索")
         if self._starting_semester:
+            if self._label(boxes, "覆盖当前自动存档", (.20, .38, .80, .57), contains=True):
+                return self._label(boxes, "确认", (.56, .55, .78, .70))
             prompts += ("是否开始新学期", "是否开启新学期")
         if any(self._label(boxes, label, (.2, .34, .8, .59), contains=True) for label in prompts):
             return self._label(boxes, "确认", (.61, .75, .8, .9))
         return None
 
     def _study_focus(self, boxes):
-        if not self._label(boxes, "学业的追求与逻辑的锻炼", (.46, .28, .92, .44), contains=True):
-            return None
+        academic = self._label(boxes, "学业的追求与逻辑的锻炼", (.46, .28, .92, .44), contains=True)
+        if not academic or self._journey_number == 1:
+            return academic
         focus = self._label(boxes, "综合素质的全面成长与发展", (.46, .68, .92, .84), contains=True)
         locked = self._label(boxes, "后解锁", (.46, .81, .92, .95), contains=True)
         if focus and not locked:
             return focus
-        return self._label(boxes, "学业的追求与逻辑的锻炼", (.46, .28, .92, .44), contains=True)
+        return academic
+
+    def _ending_selector(self, boxes):
+        if not self._label(boxes, "选择属于你的", (.02, .14, .44, .28), contains=True):
+            return None
+        return self._label(boxes, "确定", (.40, .89, .60, .97))
+
+    def _save_ending_checkpoint(self, confirm):
+        self.click(confirm, after_sleep=.9)
+        for _ in range(6):
+            boxes = self._read()
+            if storage := self._label(boxes, "档案存储", (.28, .65, .48, .93)):
+                break
+            if self._envelope(boxes):
+                self.click(.50, .58, after_sleep=.65)
+            elif self._letter_button(boxes):
+                self.click(.895, .872, after_sleep=.65)
+            elif self._dialogue_panel(boxes) or self._label(boxes, "长按加速", (.83, .86, 1, .97)):
+                self.click(.90, .067, after_sleep=.65)
+            elif self._date(boxes) == (12, 2):
+                self.click(.954, .067, after_sleep=.65)
+            else:
+                self.sleep(.55)
+        else:
+            raise RuntimeError("结局前无法打开学院手册。")
+
+        self.click(storage, after_sleep=.8)
+        boxes = self._read()
+        if not (self._label(boxes, "档案存储", (.07, .12, .29, .22), contains=True)
+                and self._label(boxes, "12/02", (.10, .23, .21, .34))):
+            raise RuntimeError("结局前未确认 12/02 存档页面。")
+        empty_slots = [box for box in boxes if box.name == "暂无存档"
+                       and .20 < box.center()[0] / self.width < .88
+                       and .25 < box.center()[1] / self.height < .85]
+        if not empty_slots:
+            raise RuntimeError("结局前未找到空白手动存档位。")
+        slot = min(empty_slots, key=lambda box: (box.center()[1], box.center()[0]))
+        self.click(slot, after_sleep=.9)
+        boxes = self._read()
+        if self._label(boxes, "是否确认覆盖此存档位", (.30, .36, .70, .59), contains=True):
+            confirm = self._label(boxes, "确认", (.58, .75, .82, .90))
+            if not confirm:
+                raise RuntimeError("未识别到空白栏位的保存确认按钮。")
+            self.click(confirm, after_sleep=.9)
+            boxes = self._read()
+        x, y = slot.center()
+        saved_card = (x / self.width - .19, y / self.height - .08,
+                      x / self.width + .19, y / self.height + .065)
+        if not self._label(boxes, "12/02", saved_card):
+            raise RuntimeError("未确认空白栏位已写入 12/02 手动档。")
+        self.log_info("已在空白栏位保存 12/02 结局前手动档")
+        self.click(.954, .068, after_sleep=.65)
+        if self.wait_until(lambda: self._settings(self._read()), time_out=5):
+            self.click(.954, .068, after_sleep=.65)
 
     def _forum(self, boxes):
         return self._label(boxes, "SOLAR-X", (.12, .045, .29, .1), contains=True)
 
     def _full_choice(self, boxes):
-        if (self._label(boxes, "个人背包", (.48, .02, .66, .13), contains=True)
+        if (self._on_map(boxes)
                 or self._label(boxes, "阶段目标", (.72, .11, .91, .22), contains=True)):
             return None
         key = self._label(boxes, "F", (.4, .28, .53, .88))
-        options = [b for b in boxes if .57 < b.x / self.width < .88
+        options = [b for b in boxes if .54 < b.center()[0] / self.width < .90
                    and .28 < b.center()[1] / self.height < .9
                    and re.search(r"[\u4e00-\u9fff\d]", b.name)]
         if not options:
@@ -154,6 +308,10 @@ class GalGameTask(BaseTask):
     def _letter(self, boxes):
         return any(.47 < b.center()[0] / self.width < .53 and .875 < b.center()[1] / self.height < .93
                    and LETTER_PAGE.fullmatch(b.name) for b in boxes)
+
+    def _letter_button(self, boxes):
+        return (self._label(boxes, "下一页", (.83, .90, .98, .98), contains=True)
+                or self._label(boxes, "结束", (.83, .90, .98, .98)))
 
     def _envelope(self, boxes):
         return (self._label(boxes, "致:", (.18, .22, .38, .33), contains=True)
@@ -228,29 +386,64 @@ class GalGameTask(BaseTask):
         self._need_shop_buy = False
         self.click(.954, .067, after_sleep=.65)
 
+    def _buy_gifts(self):
+        def gift_receipt():
+            current = self._read()
+            return current if self._label(current, "新增物品", (.06, .20, .34, .42), contains=True) else None
+
+        # The shop moves a purchased card to the end of the list.
+        for _ in range(2):
+            self.click(.305, .40, after_sleep=.55)
+            boxes = self._read()
+            if not self._label(boxes, "送礼物", (.74, .31, .97, .43), contains=True):
+                break
+            if not (buy := self._label(boxes, "购买", (.75, .84, .96, .95))):
+                break
+            self.click(buy, after_sleep=.75)
+            boxes = self._read()
+            if confirm := self._label(boxes, "确认", (.55, .74, .87, .93)):
+                self.click(confirm, after_sleep=.85)
+            boxes = self.wait_until(gift_receipt, time_out=3)
+            if not boxes:
+                self.log_warning("未能确认学院商店的礼物购买结果。")
+                break
+            self._gifts_available += 1
+            if not (close := self._label(boxes, "确定", (.40, .76, .60, .92))):
+                raise RuntimeError("未识别到礼物购买提示的关闭按钮。")
+            self.click(close, after_sleep=.65)
+        self._gift_shop_date = None
+        self.click(.954, .067, after_sleep=.65)
+
+    def _give_gift(self, button):
+        self.click(button, after_sleep=.7)
+        boxes = self._read()
+        if not self._label(boxes, "角色礼物", (.43, .16, .70, .30), contains=True):
+            return
+        if use := self._label(boxes, "使用", (.66, .81, .93, .96)):
+            self.click(use, after_sleep=.85)
+            self._gifts_available -= 1
+            boxes = self._read()
+        if self._label(boxes, "角色礼物", (.43, .16, .70, .30), contains=True):
+            self.click(.954, .067, after_sleep=.65)
+
     def _play_lottery(self):
         icon = self.frame[round(.044 * self.height):round(.091 * self.height),
                           round(.788 * self.width):round(.833 * self.width)]
         hue, saturation, value = cv2.split(cv2.cvtColor(icon, cv2.COLOR_BGR2HSV))
         colored = (saturation > 115) & (value > 150)
-        if np.mean(colored) < .03:
-            self.sleep(.5)
-            return
         # The balance switches from a red ticket to a gold coin after the last free draw.
-        if np.mean(colored & ((hue < 10) | (hue > 170))) < .02:
+        if (np.mean(colored & ((hue < 10) | (hue > 170))) < .02
+                or self._lottery_index >= 28):
             self._finished_lottery = True
             self.click(.942, .067, after_sleep=.75)
             return
-        digits = self.ocr(.827, .038, .896, .103, match=re.compile(r"^[1-9]\d?$"), target_height=1440)
-        if digits:
-            index = self._lottery_index % 28
-            self._lottery_index += 1
-            self.click(.231 + .0683 * (index % 7), .38 + .121 * (index // 7), after_sleep=.85)
-        else:
-            self.sleep(.5)
+        index = self._lottery_index
+        self._lottery_index += 1
+        self.click(.231 + .0683 * (index % 7), .38 + .121 * (index // 7),
+                   name="使用活动兑奖券", after_sleep=1.1)
 
     def _paper_choice(self, boxes):
-        if (self._label(boxes, "个人背包", (.48, .02, .66, .13), contains=True)
+        if (self._on_map(boxes)
                 or self._label(boxes, "阶段目标", (.72, .11, .91, .22), contains=True)):
             return None
         key = self._label(boxes, "F", (.7, .5, .755, .88))
@@ -280,7 +473,7 @@ class GalGameTask(BaseTask):
 
     def _exam_answer(self, options, date):
         for pattern in EXAM_ANSWERS.get(date or self._active_date, ()):
-            if answer := next((b for b in options if re.search(pattern, b.name)), None):
+            if answer := next((b for b in options if re.search(pattern, re.sub(r"\s+", "", b.name))), None):
                 return answer
         return None
 
@@ -296,13 +489,21 @@ class GalGameTask(BaseTask):
     def reset_to_start(self):
         # The activity's current journey is the baseline, including in-progress saves.
         self._claim_log = {}
-        self._astrite_remaining = {}
         self._need_shop_buy = False
         self._shop_buys = 0
+        self._journey_number = None
+        self._reset_journey_progress()
+
+    def _reset_journey_progress(self):
         self._friend_levels = {}
         self._reward_checkpoints = set()
         self._story_ending = False
         self._schedule_tabs = {}
+        self._reused_schedule_dates = set()
+        self._gift_shop_dates = set()
+        self._gift_visits = set()
+        self._gift_shop_date = None
+        self._gifts_available = 0
         self._active_date = None
         self._starting_semester = False
         self._finished_lottery = False
@@ -318,7 +519,7 @@ class GalGameTask(BaseTask):
         return self.ocr(.035, .035, .18, .09, match=title)
 
     def _settings(self, boxes):
-        return self._label(boxes, "设置", (.79, .03, .92, .11)) and self._label(
+        return self._label(boxes, "学院手册", (.30, .12, .70, .27), contains=True) and self._label(
             boxes, "退出游戏", (.52, .81, .71, .94))
 
     def _reward_counts(self, boxes):
@@ -328,26 +529,8 @@ class GalGameTask(BaseTask):
                 self._claim_log[REWARD_PAGES[total - 14]] = f"{earned}/{total}"
 
     def _all_rewards_earned(self):
-        return (len(self._astrite_remaining) == len(REWARD_PAGES)
-                and all(count == 0 for count in self._astrite_remaining.values()))
-
-    def _row_has_astrite(self, cy):
-        y1 = max(0, round(cy - .045 * self.height))
-        y2 = min(self.height, round(cy + .045 * self.height))
-        roi = self.frame[y1:y2, round(.655 * self.width):round(.712 * self.width)]
-        if roi.size == 0:
-            return False
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        astrite = (hsv[:, :, 0] >= 92) & (hsv[:, :, 0] <= 122) & (hsv[:, :, 1] >= 40) & (hsv[:, :, 2] >= 150)
-        return float(np.mean(astrite)) > .03
-
-    def _count_astrite_in_progress(self, title, boxes):
-        max_y = .80 if title == "限时奖励" else .92
-        rows = [b for b in boxes if .80 < b.center()[0] / self.width < .95
-                and .15 < b.center()[1] / self.height < max_y and "进行中" in b.name]
-        if title == "限时奖励":
-            self._need_shop_buy = bool(self._label(boxes, "累计购买商品", (.35, .15, .75, .80), contains=True))
-        return sum(1 for row in rows if self._row_has_astrite(row.center()[1]))
+        return all(self._claim_log.get(title) == f"{total}/{total}"
+                   for title, total in zip(REWARD_PAGES, (14, 15)))
 
     def _claim_rewards(self, title, button):
         opened = False
@@ -388,7 +571,9 @@ class GalGameTask(BaseTask):
             if not checked and not any(re.search(r"进行中|已领取|已完成", b.name) for b in status):
                 self.sleep(.4)
                 continue
-            self._astrite_remaining[title] = self._count_astrite_in_progress(title, boxes)
+            if title == "限时奖励":
+                self._need_shop_buy = bool(self._label(
+                    boxes, "累计购买商品", (.35, .15, .75, .80), contains=True))
             # Available tasks sort first, and one button claims all on that page.
             self.click(.954, .067, after_sleep=.7)
             return
@@ -396,7 +581,9 @@ class GalGameTask(BaseTask):
 
     def _collect_rewards(self, boxes, parent):
         self._reward_counts(boxes)
-        for title in REWARD_PAGES:
+        for title, total in zip(REWARD_PAGES, (14, 15)):
+            if self._claim_log.get(title) == f"{total}/{total}":
+                continue
             button = self._label(boxes, title, (0, .42, .2, .9))
             if button:
                 self._claim_rewards(title, button)
@@ -414,6 +601,7 @@ class GalGameTask(BaseTask):
                         self.click(.954, .067, after_sleep=.7)
                 if not boxes:
                     raise RuntimeError("领取奖励后无法返回活动菜单。")
+                self._reward_counts(boxes)
         if self._claim_log:
             self.info_set("奖励进度", dict(self._claim_log))
         return boxes
@@ -424,7 +612,7 @@ class GalGameTask(BaseTask):
                 self.click(.431, .492, after_sleep=.12)
             self.click(.694, .832, after_sleep=.6)
             return True
-        if any(self._label(boxes, label, (.83, .9, .97, .98)) for label in ("结束", "下一页")):
+        if self._letter_button(boxes):
             self.click(.894, .872, after_sleep=.6)
             return True
         options = [b for b in boxes if b.x > .67 * self.width
@@ -452,6 +640,9 @@ class GalGameTask(BaseTask):
             return True
         return False
 
+    def _on_map(self, boxes):
+        return bool(self._label(boxes, "人背包", (.48, .02, .66, .13), contains=True))
+
     def _map_marker(self, boxes):
         # Red exclamation badges are map events. OCR supplies the map context,
         # while the icon remains readable when a building label is obscured.
@@ -473,6 +664,8 @@ class GalGameTask(BaseTask):
                 continue
             for box in boxes:
                 tx, ty = box.center()
+                if tx < .20 * self.width and ty > .60 * self.height:
+                    continue
                 if tx / self.width > .71 and ty / self.height < .36:
                     continue
                 if any(word in box.name for word in ("阶段目标", "距离", "还有")):
@@ -490,7 +683,7 @@ class GalGameTask(BaseTask):
     def _enter_location(self, location):
         self.click(location, after_sleep=.75)
         boxes = self._read()
-        if self._label(boxes, "个人背包", (.48, .02, .66, .13), contains=True):
+        if self._on_map(boxes):
             same = self._label(boxes, location.name, (.06, .2, .93, .97))
             if same:
                 x, y = same.center()
@@ -578,7 +771,7 @@ class GalGameTask(BaseTask):
                 or self._label(boxes, "日程安排", (.7, .87, .87, .98), contains=True)
                 or self._label(boxes, "阶段目标", (.72, .11, .91, .22), contains=True)):
             return False
-        room = next((name for name in COURSES
+        room = next((name for name in (*COURSES, "街道")
                      if self._label(boxes, name, (.02, .14, .23, .23))), None)
         slot_tag = self._label(boxes, "占用「", (.72, .2, .99, .85), contains=True)
         if not room and not slot_tag and not self._label(boxes, "赠送礼物", (.19, .3, .4, .46), contains=True):
@@ -590,7 +783,8 @@ class GalGameTask(BaseTask):
                 self._too_tired_rooms.add(room)
             self.click(.954, .068, after_sleep=.65)
             return True
-        if room == "学院商店" and self._need_shop_buy and self._shop_buys < 3:
+        buying_gifts = self._gift_shop_date is not None and self._gift_shop_date == self._active_date
+        if room == "学院商店" and (buying_gifts or (self._need_shop_buy and self._shop_buys < 3)):
             if shop := self._label(boxes, "学院商店", (.70, .35, .95, .46)):
                 self.click(shop, after_sleep=.75)
                 return True
@@ -600,10 +794,16 @@ class GalGameTask(BaseTask):
             else:
                 self.click(lottery, after_sleep=.85)
             return True
-        for level, text in enumerate(("初遇", "相知", "熟识", "挚友")):
+        for level, text in enumerate(("初遇", "熟识", "相知", "挚友")):
             if room and self._label(boxes, text, (.7, .125, .93, .205), contains=True):
                 self._friend_levels[room] = level
                 break
+        visit = (self._active_date, room)
+        if self._gifts_available and room in GIFT_LOCATIONS and visit not in self._gift_visits:
+            self._gift_visits.add(visit)
+            if gift := self._label(boxes, "送礼物", (.17, .30, .45, .47), contains=True):
+                self._give_gift(gift)
+                return True
         commission = self._label(boxes, "特别委托", (.19, .23, .96, .8))
         if commission and (self._active_date, room) in self._skipped_commissions:
             commission = None
@@ -676,7 +876,8 @@ class GalGameTask(BaseTask):
         gold = (hsv[:, :, 0] >= 13) & (hsv[:, :, 0] <= 33) & (hsv[:, :, 1] > 140)
         has_commissions = np.mean(gold) > .10 or bool(self._label(
             boxes, "待执行次数", (.42, .36, .61, .52), contains=True))
-        self._schedule_tabs[date] = has_commissions
+        if date is not None:
+            self._schedule_tabs[date] = has_commissions
         if has_commissions:
             self._schedule_commission(boxes)
         return has_commissions
@@ -697,14 +898,22 @@ class GalGameTask(BaseTask):
                 return
 
     def _schedule_step(self, boxes, save, date):
+        date = date or self._active_date
         slots = [b for b in boxes if .11 < b.x / self.width < .37
                  and .235 < b.center()[1] / self.height < .7 and "暂无安排" in b.name]
         if not slots:
             self.click(save, after_sleep=.8)
             return
 
-        offset = .059 if self._commission_tabs(date) else 0
         fatigue = self._fatigue(boxes)
+        second_journey = self._journey_number == 2
+        if (date and date > (4, 8) and len(slots) == 5
+                and fatigue is not None and fatigue <= 30 and date not in self._reused_schedule_dates):
+            if reuse := self._label(boxes, "沿用上周", (.58, .86, .86, .98), contains=True):
+                self._reused_schedule_dates.add(date)
+                self.click(reuse, after_sleep=.65)
+                return
+        offset = .059 if self._commission_tabs(date) else 0
         if (len(slots) == 5 and self._label(boxes, "04/01", (.045, .03, .22, .095), contains=True)
                 and self._schedule_activity(.654, ("文科课程",))):
             return
@@ -724,6 +933,8 @@ class GalGameTask(BaseTask):
         money = self._schedule_money(boxes)
         science = COURSES["理科教室"]
         work = COURSES["家庭餐厅"]
+        if second_journey and self._schedule_activity(.713 + offset, work):
+            return
         study_plan = (.23, .235, .37, .7)
         needs_badges = (knowledge >= 65 and money is not None and money < 20000
                         and not any(self._label(boxes, job, study_plan, contains=True) for job in work))
@@ -745,9 +956,22 @@ class GalGameTask(BaseTask):
     def _play_step(self, boxes, date):
         if self._tutorial(boxes):
             return True
+        if (self._journey_number == 2
+                and self._label(boxes, "即将进入结局阶段", (.29, .38, .73, .59), contains=True)):
+            if confirm := self._label(boxes, "确认", (.43, .76, .58, .94)):
+                self._save_ending_checkpoint(confirm)
+                return True
         if self._label(boxes, "本次共获取", (.5, .2, .95, .98), contains=True):
             self.click(.954, .068, after_sleep=.7)
             return True
+        if ending := self._ending_selector(boxes):
+            if self._label(boxes, "已达成该结局", (.40, .80, .60, .90), contains=True):
+                self.click(.812, .378, after_sleep=.75)
+            else:
+                self.click(ending, after_sleep=1.2)
+            return True
+        if self._label(boxes, "顺利通关", (.20, .72, .80, .97), contains=True):
+            self._story_ending = True
         if self._label(boxes, "故事结局", (.14, .05, .86, .65), contains=True):
             for label in ("返回标题", "返回首页", "返回主界面"):
                 if button := self._label(boxes, label, (.25, .7, .99, .98), contains=True):
@@ -756,6 +980,10 @@ class GalGameTask(BaseTask):
                     return True
         if next_month := self._label(boxes, "进入下个月", (.75, .85, .96, .95)):
             self.click(next_month, after_sleep=.8)
+            return True
+        if self._label(boxes, "是否仍要继续接取", (.22, .35, .83, .56), contains=True):
+            self._skipped_commissions.add((date or self._active_date, self._current_room))
+            self.click(.31, .833, after_sleep=.65)
             return True
         if offer := self._commission_offer(boxes):
             key = (date or self._active_date, self._current_room)
@@ -778,7 +1006,10 @@ class GalGameTask(BaseTask):
             self._play_lottery()
             return True
         if self._shop_screen(boxes):
-            self._buy_in_shop(boxes)
+            if self._gift_shop_date is not None and self._gift_shop_date == self._active_date:
+                self._buy_gifts()
+            else:
+                self._buy_in_shop(boxes)
             return True
         if save := self._schedule_save(boxes):
             self._schedule_step(boxes, save, date)
@@ -849,9 +1080,10 @@ class GalGameTask(BaseTask):
             return True
         if not date:
             return False
-        weekend = any(self._label(boxes, day, (.035, .085, .11, .14)) for day in ("周六", "周日"))
+        weekend = (any(self._label(boxes, day, (.035, .085, .11, .14)) for day in ("周六", "周日"))
+                   or self._label(boxes, "周末可邀请伙伴", (.025, .13, .31, .24), contains=True))
         schedule = self._label(boxes, "日程安排", (.7, .87, .87, .98), contains=True)
-        on_map = bool(self._label(boxes, "个人背包", (.48, .02, .66, .13), contains=True))
+        on_map = self._on_map(boxes)
         outing_btn = next((b for b in boxes if .83 <= b.center()[0] / self.width <= .99
                            and .88 <= b.center()[1] / self.height <= .98
                            and re.search(r"[\u4e00-\u9fff]", b.name)
@@ -881,9 +1113,11 @@ class GalGameTask(BaseTask):
         if outing:
             self.click(.908, .919, after_sleep=.75)
             return True
-        if self._label(boxes, "个人背包", (.48, .02, .66, .13), contains=True):
+        if on_map:
             if home and not weekend and (self._fatigue(boxes) or 0) >= 85:
                 self.click(.918, .868, after_sleep=.65)
+                return True
+            if self._journey_number == 2 and weekend and self._enter_gift_location(boxes, date):
                 return True
             marker, directions = self._map_marker(boxes)
             if marker:
@@ -923,6 +1157,26 @@ class GalGameTask(BaseTask):
                 return True
         return False
 
+    def _enter_gift_location(self, boxes, date):
+        map_labels = (.06, .20, .95, .97)
+        if (date not in self._gift_shop_dates
+                and (stock := self._label(boxes, "新品上架", (.01, .10, .31, .21), contains=True))):
+            self._gift_shop_dates.add(date)
+            self._gift_shop_date = date
+            self.log_info("学院商店新品上架，查看可购买的礼物")
+            if shop := self._label(boxes, "学院商店", map_labels):
+                self._enter_location(shop)
+            else:
+                self.click(stock, after_sleep=.7)
+            return True
+        if self._gifts_available:
+            for name in GIFT_LOCATIONS:
+                if (date, name) not in self._gift_visits:
+                    if location := self._label(boxes, name, map_labels):
+                        self._enter_location(location)
+                        return True
+        return False
+
     def run(self):
         self.reset_to_start()
         if not self.verify_start_state():
@@ -938,6 +1192,10 @@ class GalGameTask(BaseTask):
                 boxes = self._read()
                 date = self._date(boxes)
                 if date and date != last_date:
+                    if last_date and last_date >= (12, 1) and date[0] == 3 and not self._starting_semester:
+                        self._reset_journey_progress()
+                        self._journey_number = 2
+                        recent.clear()
                     last_date = date
                     self._active_date = date
                     self._starting_semester = False
@@ -945,39 +1203,30 @@ class GalGameTask(BaseTask):
                     self._lottery_index = 0
                     self._too_tired_rooms.clear()
                     self.log_info(f"学期进度 {date[0]:02}/{date[1]:02}")
+                if not entered and (self._lobby(boxes) or self._archive_page(boxes)):
+                    self._start_from_archive(boxes)
+                    entered = True
+                    idle_since = monotonic()
+                    continue
                 if self._lobby(boxes):
                     boxes = self._collect_rewards(boxes, self._lobby)
-                    if self._all_rewards_earned():
+                    resume = self._continue_journey_button(boxes)
+                    finished = self._story_ending or (not resume and last_date and last_date >= (12, 1))
+                    if finished and self._all_rewards_earned():
                         return dict(self._claim_log)
-                    resume = self._label(boxes, "继续旅程", (.65, .6, 1, .95), contains=True)
-                    if not resume:
-                        candidates = self.ocr(.64, .59, .97, .96, match="继续旅程")
-                        resume = candidates[0] if candidates else None
-                    if entered:
-                        finished = self._story_ending or (not resume and last_date and last_date >= (12, 1))
-                        if not finished or completed_journeys >= 2:
-                            raise RuntimeError(f"旅程已返回活动首页，奖励进度 {self._claim_log}")
-                        completed_journeys += 1
-                        self._story_ending = False
-                        self._friend_levels.clear()
-                        self._reward_checkpoints.clear()
-                        self._schedule_tabs.clear()
-                        self._finished_lottery = False
-                        self._skipped_commissions.clear()
-                        self._too_tired_rooms.clear()
-                        self._current_room = None
-                        recent.clear()
-                        resume = None
-                    start = resume or self._lobby(boxes)
-                    self._starting_semester = not resume
-                    self.click(start, after_sleep=2)
-                    entered = True
+                    if not finished or completed_journeys >= 2:
+                        raise RuntimeError(f"旅程已返回活动首页，奖励进度 {self._claim_log}")
+                    completed_journeys += 1
+                    self._reset_journey_progress()
+                    recent.clear()
+                    self._start_from_archive(boxes)
                     idle_since = monotonic()
                     continue
                 entered = entered or date is not None
                 signature = tuple(re.sub(r"\s+", "", b.name) for b in boxes
                                   if re.search(r"[\u4e00-\u9fff]|\d/\d", b.name))
-                transition = not date and (len(signature) < 3 or self._letter(boxes))
+                transition = (not date and (len(signature) < 3 or self._letter(boxes))) or (
+                    date == (3, 18) and self._label(boxes, "迎来开学第一课", contains=True))
                 if "长按加速" in signature:
                     stuck = len(recent) >= 15 and all(s == signature for s in list(recent)[-15:])
                 else:
@@ -986,7 +1235,7 @@ class GalGameTask(BaseTask):
                 if stuck:
                     raise RuntimeError(f"活动界面重复出现：{'，'.join(signature[:12])}")
                 if self._play_step(boxes, date):
-                    if self._all_rewards_earned():
+                    if self._story_ending and self._all_rewards_earned():
                         return dict(self._claim_log)
                     recent.append(signature)
                     idle_since = monotonic()
